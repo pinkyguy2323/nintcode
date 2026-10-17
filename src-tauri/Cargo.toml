@@ -1,0 +1,29 @@
+[package]
+name = "nintcode"
+version = "0.5.0"
+description = "NintCode — The Free Local AI Coding Workspace"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-os = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"] }
+futures-util = "0.3"
+sysinfo = "0.30"
+rusqlite = { version = "0.31", features = ["bundled"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
