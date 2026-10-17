@@ -3,7 +3,7 @@ import { Send, Square, Bot, User, Wrench, AlertTriangle, Check, Sparkles, Copy }
 import { useStore } from '../store';
 import type { AgentMode, ChatMessage, PerfStats } from '../types';
 import { streamChatCompletion, readTextFile, writeTextFile, runCommand, listDir } from '../lib/tauri';
-import { parseToolCalls, buildPrompt, needsConfirm } from '../lib/agent';
+import { parseToolCalls, buildPrompt, needsConfirm, stripToolPreview } from '../lib/agent';
 
 export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void }) {
   const { settings, messages, setMessages, providers, activeProviderId, activeLocalModel, projectPath } = useStore();
@@ -62,56 +62,85 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
       } catch { extra += `\n\nFile @${f}: (unreadable)`; }
     }
 
-    const id = uid();
-    setMessages((m) => [...m, { id, role: 'assistant', content: '', ts: Date.now(), streaming: true }]);
-    const t0 = performance.now();
-    let firstMs = 0;
-    let tokens = 0;
+    // Conversation for this turn — grows with tool results so the model can chain calls.
+    const convo: { role: string; content: string }[] = [
+      ...messages.slice(-12).map((m) => ({ role: m.role === 'tool' ? 'user' : m.role, content: m.content })),
+      { role: 'user', content: text || 'Continue with the confirmed tool call.' },
+    ];
+    const executed = new Set<string>();
+
     try {
-      abortRef.current = new AbortController();
-      const full = await streamChatCompletion({
-        baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, model: endpoint.model,
-        messages: [
-          { role: 'system', content: sys + extra },
-          ...messages.slice(-12).map((m) => ({ role: m.role === 'tool' ? 'user' : m.role, content: m.content })),
-          { role: 'user', content: text || 'Continue with confirmed tools.' },
-        ],
-        signal: abortRef.current.signal,
-        throttleMs: settings.powerProfile === 'eco' ? 24 : 0,
-        onToken: (tok) => {
-          if (!firstMs) firstMs = performance.now() - t0;
-          tokens += tok.length / 4;
-          setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: x.content + tok } : x)));
-          scrollDown();
-        },
-      });
-      const dt = (performance.now() - t0) / 1000;
-      onPerf({
-        tokensPerSec: tokens / Math.max(dt, 0.1), vramMB: 0, ramMB: 0,
-        firstTokenMs: firstMs, contextUsed: full.length / 4, contextTotal: 32768,
-        device: endpoint.local ? 'GPU local' : 'Cloud API',
-      });
+      for (let round = 0; round < 4; round++) {
+        const id = uid();
+        setMessages((m) => [...m, { id, role: 'assistant', content: '', ts: Date.now(), streaming: true }]);
+        const t0 = performance.now();
+        let firstMs = 0;
+        let tokens = 0;
+        abortRef.current = new AbortController();
+        const full = await streamChatCompletion({
+          baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, model: endpoint.model,
+          messages: [{ role: 'system', content: sys + extra }, ...convo],
+          signal: abortRef.current.signal,
+          throttleMs: settings.powerProfile === 'eco' ? 24 : 0,
+          onToken: (tok) => {
+            if (!firstMs) firstMs = performance.now() - t0;
+            tokens += tok.length / 4;
+            setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: x.content + tok } : x)));
+            scrollDown();
+          },
+        });
+        const dt = (performance.now() - t0) / 1000;
+        onPerf({
+          tokensPerSec: tokens / Math.max(dt, 0.1), vramMB: 0, ramMB: 0,
+          firstTokenMs: firstMs, contextUsed: full.length / 4, contextTotal: settings.ctxSize || 32768,
+          device: endpoint.local ? 'GPU local' : 'Cloud API',
+        });
 
-      const { clean, calls } = parseToolCalls(full);
-      setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: clean || '_(tool calls)_', streaming: false } : x)));
-
-      if (mode !== 'agent') { setBusy(false); scrollDown(); return; }
-
-      for (const c of calls.slice(0, 3)) {
-        if (settings.confirmDangerous && needsConfirm(c.name, c.args) && !confirmed.some((x) => x.name === c.name)) {
-          setPendingConfirms((p) => [...p, { id: uid(), name: c.name, args: c.args }]);
-          push({ role: 'tool', content: `⏸ Needs confirmation: ${c.name} ${JSON.stringify(c.args).slice(0, 300)}` });
-          continue;
+        const { clean, calls, invalid } = parseToolCalls(full);
+        let shown = clean;
+        if (invalid > 0) {
+          shown = (shown ? shown + '\n\n' : '') + `⚠ ${invalid} tool call${invalid > 1 ? 's' : ''} skipped (incomplete JSON — output was cut off or malformed).`;
         }
-        const out = await execTool(c.name, c.args);
-        push({ role: 'tool', content: `${c.name} → ${out.slice(0, 3000)}` });
+        if (!shown && calls.length) shown = `⚙ ${calls.length} tool call${calls.length > 1 ? 's' : ''}: ${calls.map((c) => c.name).join(', ')}`;
+        setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: shown || '…', streaming: false } : x)));
+
+        convo.push({ role: 'assistant', content: full.slice(0, 6000) });
+
+        if (mode !== 'agent' || !calls.length) break;
+
+        const runnable: { c: { name: string; args: Record<string, unknown> }; sig: string }[] = [];
+        for (const c of calls.slice(0, 3)) {
+          const sig = c.name + '|' + JSON.stringify(c.args).slice(0, 300);
+          if (executed.has(sig)) continue;
+          if (settings.confirmDangerous && needsConfirm(c.name, c.args) && !confirmed.some((x) => x.name === c.name)) {
+            setPendingConfirms((p) => [...p, { id: uid(), name: c.name, args: c.args }]);
+            push({ role: 'tool', content: `⏸ Needs confirmation: ${c.name} ${JSON.stringify(c.args).slice(0, 300)}` });
+            continue;
+          }
+          runnable.push({ c, sig });
+        }
+        if (!runnable.length) break;
+
+        for (const { c, sig } of runnable) {
+          executed.add(sig);
+          const out = await execTool(c.name, c.args);
+          push({ role: 'tool', content: `${c.name} → ${out.slice(0, 3000)}` });
+          convo.push({ role: 'user', content: `Tool result (${c.name}):\n${out.slice(0, 4000)}` });
+        }
+        if (round === 3) {
+          push({ role: 'assistant', content: '⏸ Paused after 4 tool rounds — send "continue" to keep going.' });
+        }
       }
     } catch (e) {
       const msg = String((e as Error).message ?? e);
       if (msg.toLowerCase().includes('abort')) {
-        setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: x.content + '\n\n⏹ Stopped.', streaming: false } : x)));
+        setMessages((m) => m.map((x) => {
+          if (!x.streaming) return x;
+          const t = stripToolPreview(x.content).text;
+          return { ...x, content: (t ? t + '\n\n' : '') + '⏹ Stopped.', streaming: false };
+        }));
       } else {
-        setMessages((m) => m.map((x) => (x.id === id ? { ...x, content: '❌ ' + msg.slice(0, 600) + '\n\nCheck: 1) local server running (llama-server / Ollama)? 2) Base URL in API? 3) model loaded?', streaming: false } : x)));
+        setMessages((m) => m.map((x) => (x.streaming ? { ...x, content: '❌ ' + msg.slice(0, 600) + '\n\nCheck: 1) local server running (llama-server / Ollama)? 2) Base URL in API? 3) model loaded?', streaming: false } : x)));
       }
     }
     setBusy(false);
@@ -140,8 +169,9 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
           return items.map((i) => (i.isDir ? '[dir] ' : '      ') + i.name).join('\n').slice(0, 4000) || '(empty)';
         }
         case 'write_file': {
-          await writeTextFile(rel(args.path), String(args.content ?? ''));
-          return 'written ' + String(args.path);
+          if (typeof args.content !== 'string') return 'refused: write_file needs a "content" string — no changes made';
+          await writeTextFile(rel(args.path), args.content);
+          return 'written ' + String(args.path) + ` (${args.content.length} chars)`;
         }
         case 'edit_file': {
           const p = rel(args.path);
@@ -231,13 +261,19 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
                 {m.role === 'user' && <User size={10} className="mb-1 opacity-60" />}
                 {m.role === 'user' || m.role === 'tool' ? (
                   <span className="selectable whitespace-pre-wrap">{m.content}</span>
-                ) : (
-                  <div className="selectable">
-                    {renderRich(m.content)}
-                    {m.streaming && <span className="ml-1 inline-block h-3 w-1.5 animate-pulseDot rounded-sm bg-nint-blue align-middle" />}
-                    {!m.content && m.streaming && <span className="shimmer-line inline-block h-3 w-28 rounded" />}
-                  </div>
-                )}
+                ) : (() => {
+                  const disp = m.streaming ? stripToolPreview(m.content) : { text: m.content, hidden: false };
+                  return (
+                    <div className="selectable">
+                      {disp.text && renderRich(disp.text)}
+                      {disp.hidden && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-nint-blue/25 bg-nint-blue/10 px-1.5 py-0.5 text-[10px] text-nint-blue">⚙ preparing tool call…</span>
+                      )}
+                      {m.streaming && !disp.hidden && <span className="ml-1 inline-block h-3 w-1.5 animate-pulseDot rounded-sm bg-nint-blue align-middle" />}
+                      {!disp.text && !disp.hidden && m.streaming && <span className="shimmer-line inline-block h-3 w-28 rounded" />}
+                    </div>
+                  );
+                })()}
               </div>
               {m.role === 'assistant' && !m.streaming && m.content && (
                 <button

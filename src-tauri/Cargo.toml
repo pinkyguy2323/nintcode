@@ -1,6 +1,6 @@
 [package]
 name = "nintcode"
-version = "0.5.0"
+version = "0.6.0"
 description = "NintCode — The Free Local AI Coding Workspace"
 edition = "2021"
 

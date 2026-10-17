@@ -9,8 +9,8 @@
 
 | Файл | Тип |
 |---|---|
-| `NintCode_0.5.0_x64-setup.exe` | NSIS установщик (Windows 10/11 x64) |
-| `NintCode_0.5.0_x64_en-US.msi` | MSI |
+| `NintCode_0.6.0_x64-setup.exe` | NSIS установщик (Windows 10/11 x64) |
+| `NintCode_0.6.0_x64_en-US.msi` | MSI |
 
 Портативный exe собирается в `F:\nintcode\src-tauri\target\release\nintcode.exe`.
 

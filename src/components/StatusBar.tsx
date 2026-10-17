@@ -26,7 +26,7 @@ export default function StatusBar({ perf }: { perf: PerfStats | null }) {
       <span className="opacity-30">·</span>
       <span>{activeLocalModel ?? provider?.modelId ?? 'no model'}</span>
       <span className="opacity-30">·</span>
-      <span className="font-medium">NintCode 0.5.0 · free forever</span>
+      <span className="font-medium">NintCode 0.6.0 · free forever</span>
       {settings.powerProfile === 'eco' && <span className="chip border-amber-400/40 bg-amber-400/10 text-amber-300 !py-0 text-[10px]">ECO — GPU/CPU reduced</span>}
       {settings.gpuOnly && <span className="chip border-nint-violet/40 bg-nint-violet/10 text-nint-violet !py-0 text-[10px]">GPU ONLY</span>}
     </footer>
