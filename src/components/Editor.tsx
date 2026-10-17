@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { X, Eye, FileCode2 } from 'lucide-react';
 import { useStore } from '../store';
@@ -16,18 +16,23 @@ function iconColor(name: string): string {
 }
 
 export default function CodeEditor() {
-  const { tabs, activeTab, setActiveTab, closeTab, settings, setProjectPath, pushRecent } = useStore();
+  const { tabs, activeTab, setActiveTab, closeTab, settings, setProjectPath, pushRecent, fileVersions } = useStore();
   const [contents, setContents] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState(false);
   const active = tabs.find((t) => t.path === activeTab);
+  const loadedVerRef = useRef<Record<string, number>>({});
 
+  // Load on first open; force-reload when the file version bumps (agent wrote it).
   useEffect(() => {
-    if (activeTab && !(activeTab in contents)) {
-      readTextFile(activeTab)
-        .then((c) => setContents((p) => (activeTab in p ? p : { ...p, [activeTab]: c })))
-        .catch(() => setContents((p) => (activeTab in p ? p : { ...p, [activeTab]: '' })));
-    }
-  }, [activeTab]);
+    if (!activeTab) return;
+    const ver = fileVersions[activeTab] ?? 0;
+    if (loadedVerRef.current[activeTab] === ver) return;
+    loadedVerRef.current[activeTab] = ver;
+    readTextFile(activeTab)
+      .then((c) => setContents((p) => ({ ...p, [activeTab]: c })))
+      .catch(() => setContents((p) => (activeTab in p ? p : { ...p, [activeTab]: '' })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, activeTab ? (fileVersions[activeTab] ?? 0) : 0]);
 
   const save = async (path: string) => {
     const c = contents[path] ?? '';

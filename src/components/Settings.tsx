@@ -90,8 +90,8 @@ export default function Settings() {
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <select className="input !w-36 !py-1 text-xs" value={rtBackend} onChange={(e) => setRtBackend(e.target.value as typeof rtBackend)}>
                   <option value="auto">Auto (by hardware)</option>
-                  <option value="cuda">CUDA 12.4 (NVIDIA, ~600 MB)</option>
-                  <option value="vulkan">Vulkan (any GPU, ~35 MB)</option>
+                  <option value="cuda">CUDA (NVIDIA, ~0.6–0.7 GB)</option>
+                  <option value="vulkan">Vulkan (any GPU, ~30 MB)</option>
                   <option value="cpu">CPU only (~20 MB)</option>
                 </select>
                 <button className="btn-ghost text-xs" disabled={rtBusy} onClick={() => void installRt()}>
@@ -99,7 +99,7 @@ export default function Settings() {
                 </button>
               </div>
               {rtMsg && <p className="mt-1.5 text-[11px] text-nint-blue">{rtMsg}</p>}
-              <p className="mt-1 text-[10.5px] text-slate-600">Downloads the official llama.cpp nightly build from GitHub once, unpacks it into the app data folder and launches it automatically with every model — no manual setup, no separate installs.</p>
+              <p className="mt-1 text-[10.5px] text-slate-600">Downloads the official llama.cpp nightly build from GitHub once (Windows .zip / Linux .tar.gz), unpacks it into the app data folder and launches it automatically with every model — no manual setup, no separate installs.</p>
             </div>
             <div>
               <p className="mb-1.5 text-xs font-semibold">Power profile (local models)</p>

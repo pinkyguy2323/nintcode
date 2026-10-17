@@ -11,6 +11,8 @@ interface State {
   tabs: OpenTab[];
   openTab: (path: string) => void;
   closeTab: (path: string) => void;
+  fileVersions: Record<string, number>;
+  bumpFileVersion: (path: string) => void;
   activeTab: string | null;
   setActiveTab: (p: string | null) => void;
   messages: ChatMessage[];
@@ -48,6 +50,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [recent, setRecent] = useState<string[]>(() => JSON.parse(localStorage.getItem('nintcode:recent') ?? '[]') as string[]);
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [fileVersions, setFileVersions] = useState<Record<string, number>>({});
   const [messages, setMessages] = useState<ChatMessage[]>(() => JSON.parse(localStorage.getItem('nintcode:chat') ?? '[]') as ChatMessage[]);
   const [providers, setProviders] = useState<Provider[]>(() => JSON.parse(localStorage.getItem('nintcode:providers') ?? '[]') as Provider[]);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(() => localStorage.getItem('nintcode:activeProvider'));
@@ -80,12 +83,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const v = useMemo(() => ({
     settings, setSettings, projectPath, setProjectPath, recent, pushRecent,
-    tabs, openTab, closeTab, activeTab, setActiveTab, messages, setMessages,
+    tabs, openTab, closeTab, fileVersions, bumpFileVersion: (p: string) => setFileVersions((x) => ({ ...x, [p]: (x[p] ?? 0) + 1 })),
+    activeTab, setActiveTab, messages, setMessages,
     providers, setProviders, activeProviderId, setActiveProviderId,
     activeLocalModel, setActiveLocalModel, onboardingDone, setOnboardingDone,
     leftTab, setLeftTab,
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [settings, projectPath, recent, tabs, activeTab, messages, providers, activeProviderId, activeLocalModel, onboardingDone, leftTab]);
+  }), [settings, projectPath, recent, tabs, activeTab, fileVersions, messages, providers, activeProviderId, activeLocalModel, onboardingDone, leftTab]);
 
   return <Ctx.Provider value={v}>{children}</Ctx.Provider>;
 }

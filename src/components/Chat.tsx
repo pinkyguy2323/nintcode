@@ -2,15 +2,15 @@ import { useMemo, useRef, useState } from 'react';
 import { Send, Square, Bot, User, Wrench, AlertTriangle, Check, Sparkles, Copy } from 'lucide-react';
 import { useStore } from '../store';
 import type { AgentMode, ChatMessage, PerfStats } from '../types';
-import { streamChatCompletion, readTextFile, writeTextFile, runCommand, listDir } from '../lib/tauri';
+import { streamChatCompletion, readTextFile, writeTextFile, runCommand, listDir, isWin } from '../lib/tauri';
 import { parseToolCalls, buildPrompt, needsConfirm, stripToolPreview } from '../lib/agent';
 
 export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void }) {
-  const { settings, messages, setMessages, providers, activeProviderId, activeLocalModel, projectPath } = useStore();
+  const { settings, messages, setMessages, providers, activeProviderId, activeLocalModel, projectPath, openTab, bumpFileVersion } = useStore();
   const [mode, setMode] = useState<AgentMode>('agent');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [pendingConfirms, setPendingConfirms] = useState<{ id: string; name: string; args: Record<string, unknown> }[]>([]);
+  const [pendingConfirms, setPendingConfirms] = useState<{ id: string; name: string; args: Record<string, unknown>; reason?: string }[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -108,22 +108,32 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
 
         if (mode !== 'agent' || !calls.length) break;
 
-        const runnable: { c: { name: string; args: Record<string, unknown> }; sig: string }[] = [];
+        const runnable: { c: { name: string; args: Record<string, unknown> }; sig: string; allowOutside: boolean }[] = [];
+        const confirmedNames = new Set(confirmed.map((x) => x.name));
         for (const c of calls.slice(0, 3)) {
           const sig = c.name + '|' + JSON.stringify(c.args).slice(0, 300);
           if (executed.has(sig)) continue;
-          if (settings.confirmDangerous && needsConfirm(c.name, c.args) && !confirmed.some((x) => x.name === c.name)) {
-            setPendingConfirms((p) => [...p, { id: uid(), name: c.name, args: c.args }]);
-            push({ role: 'tool', content: `⏸ Needs confirmation: ${c.name} ${JSON.stringify(c.args).slice(0, 300)}` });
-            continue;
+          const allowOutside = confirmedNames.has(c.name);
+          if (!allowOutside) {
+            if (settings.confirmDangerous && needsConfirm(c.name, c.args)) {
+              setPendingConfirms((p) => [...p, { id: uid(), name: c.name, args: c.args }]);
+              push({ role: 'tool', content: `⏸ Needs confirmation: ${c.name} ${JSON.stringify(c.args).slice(0, 300)}` });
+              continue;
+            }
+            const reason = settings.allowOutsideWorkspace ? null : outsideReason(c.name, c.args, projectPath);
+            if (reason) {
+              setPendingConfirms((p) => [...p, { id: uid(), name: c.name, args: c.args, reason }]);
+              push({ role: 'tool', content: `⏸ The agent wants to go outside the project folder — waiting for your confirmation. (${reason})` });
+              continue;
+            }
           }
-          runnable.push({ c, sig });
+          runnable.push({ c, sig, allowOutside });
         }
         if (!runnable.length) break;
 
-        for (const { c, sig } of runnable) {
+        for (const { c, sig, allowOutside } of runnable) {
           executed.add(sig);
-          const out = await execTool(c.name, c.args);
+          const out = await execTool(c.name, c.args, allowOutside);
           push({ role: 'tool', content: `${c.name} → ${out.slice(0, 3000)}` });
           convo.push({ role: 'user', content: `Tool result (${c.name}):\n${out.slice(0, 4000)}` });
         }
@@ -140,7 +150,7 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
           return { ...x, content: (t ? t + '\n\n' : '') + '⏹ Stopped.', streaming: false };
         }));
       } else {
-        setMessages((m) => m.map((x) => (x.streaming ? { ...x, content: '❌ ' + msg.slice(0, 600) + '\n\nCheck: 1) local server running (llama-server / Ollama)? 2) Base URL in API? 3) model loaded?', streaming: false } : x)));
+        setMessages((m) => m.map((x) => (x.streaming ? { ...x, content: '❌ ' + msg.slice(0, 700) + '\n\n' + errorHint(msg, endpoint?.local ?? true), streaming: false } : x)));
       }
     }
     setBusy(false);
@@ -151,46 +161,63 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
     setMessages((prev) => [...prev, { ...m, id: uid(), ts: Date.now() }]);
   }
 
-  async function execTool(name: string, args: Record<string, unknown>): Promise<string> {
+  async function execTool(name: string, args: Record<string, unknown>, allowOutside = false): Promise<string> {
     const rel = (p: unknown) => {
       const s = String(p ?? '');
       if (!projectPath) return s;
       if (/^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('/')) {
-        if (!settings.allowOutsideWorkspace) throw new Error('Outside-workspace access blocked (Settings → Permissions).');
+        if (!settings.allowOutsideWorkspace && !allowOutside) throw new Error('this path is outside the project folder — it needs your confirmation first');
         return s;
       }
       return join(projectPath, s);
     };
     try {
       switch (name) {
-        case 'read_file': return (await readTextFile(rel(args.path))).slice(0, 12000) || '(empty)';
+        case 'read_file': {
+          try {
+            const c = await readTextFile(rel(args.path));
+            return c.slice(0, 12000) || '(empty file — it exists but has no content yet)';
+          } catch {
+            return `FILE NOT FOUND: ${String(args.path)} does not exist yet. Do not stop — create it now with write_file (parent folders are created automatically).`;
+          }
+        }
         case 'list_directory': {
           const items = await listDir(rel(args.path ?? projectPath ?? '.'));
           return items.map((i) => (i.isDir ? '[dir] ' : '      ') + i.name).join('\n').slice(0, 4000) || '(empty)';
         }
         case 'write_file': {
           if (typeof args.content !== 'string') return 'refused: write_file needs a "content" string — no changes made';
-          await writeTextFile(rel(args.path), args.content);
-          return 'written ' + String(args.path) + ` (${args.content.length} chars)`;
+          const p = rel(args.path);
+          await writeTextFile(p, args.content);
+          bumpFileVersion(p); openTab(p);
+          const kb = (args.content.length / 1024).toFixed(1);
+          return `✅ Created/updated ${String(args.path)} (${kb} KB, ${args.content.split('\n').length} lines) — opened in editor`;
         }
         case 'edit_file': {
           const p = rel(args.path);
-          const cur = await readTextFile(p);
+          let cur = '';
+          try { cur = await readTextFile(p); } catch { return `FILE NOT FOUND: ${String(args.path)} does not exist yet — create it with write_file first.`; }
           const oldS = String(args.old ?? args.find ?? '');
           const newS = String(args.new ?? args.replace ?? '');
           if (!oldS || !cur.includes(oldS)) return 'edit skipped: anchor not found';
           await writeTextFile(p, cur.replace(oldS, newS));
-          return 'edited ' + String(args.path);
+          bumpFileVersion(p); openTab(p);
+          return `✅ Edited ${String(args.path)} — opened in editor`;
         }
         case 'create_directory': {
-          await runCommand(projectPath ?? '.', `mkdir ${JSON.stringify(String(args.path))}`);
-          return 'created ' + String(args.path);
+          const cmd = isWin() ? `mkdir ${JSON.stringify(String(args.path))}` : `mkdir -p ${JSON.stringify(String(args.path))}`;
+          const r = await runCommand(projectPath ?? '.', cmd);
+          if (r.code !== 0 && r.stderr) return 'error: ' + r.stderr.slice(0, 300);
+          return `✅ Folder created: ${String(args.path)}`;
         }
         case 'delete_file': return 'refused without explicit confirmation';
         case 'search_files': case 'search_code': {
           if (!projectPath) return 'no project open';
           const q = String(args.query ?? args.pattern ?? '');
-          const r = await runCommand(projectPath, `git grep -l -n ${JSON.stringify(q)} 2>nul || findstr /s /m /c:${JSON.stringify(q)} * 2>nul`);
+          const cmd = isWin()
+            ? `git grep -l -n ${JSON.stringify(q)} 2>nul || findstr /s /m /c:${JSON.stringify(q)} * 2>nul`
+            : `git grep -l -n ${JSON.stringify(q)} 2>/dev/null || grep -rn -l ${JSON.stringify(q)} . 2>/dev/null | head -50`;
+          const r = await runCommand(projectPath, cmd);
           return (r.stdout || '(no matches)').slice(0, 3000);
         }
         case 'run_terminal_command': case 'run_tests': {
@@ -289,7 +316,10 @@ export default function Chat({ onPerf }: { onPerf: (p: PerfStats | null) => void
         {pendingConfirms.map((c) => (
           <div key={c.id} className="msg-rise flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-400/[0.08] p-2.5 text-xs">
             <AlertTriangle size={14} className="shrink-0 text-amber-300" />
-            <span className="min-w-0 flex-1 truncate">Allow <b>{c.name}</b> <span className="code-font text-[10.5px] text-slate-400">{JSON.stringify(c.args).slice(0, 100)}</span>?</span>
+            <span className="min-w-0 flex-1 truncate">
+              Allow <b>{c.name}</b> <span className="code-font text-[10.5px] text-slate-400">{JSON.stringify(c.args).slice(0, 100)}</span>?
+              {c.reason && <span className="block truncate text-[10px] text-amber-300/90">outside the project folder — {c.reason}</span>}
+            </span>
             <button className="btn-primary !px-2.5 !py-1" onClick={() => { setPendingConfirms((p) => p.filter((x) => x.id !== c.id)); void send([c]); }}><Check size={12} /> allow</button>
             <button className="btn-ghost !py-1" onClick={() => setPendingConfirms((p) => p.filter((x) => x.id !== c.id))}>deny</button>
           </div>
@@ -335,4 +365,40 @@ function join(a: string, b: string): string {
   if (!b) return a;
   if (/^[a-zA-Z]:[\\/]/.test(b) || b.startsWith('/')) return b;
   return (a.replace(/[/\\]$/, '') + '/' + b.replace(/^[/\\]/, '')).replace(/\//g, '\\');
+}
+
+function isOutsidePath(p: string, projectPath: string): boolean {
+  const norm = (x: string) => x.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const np = norm(projectPath);
+  const n = norm(p);
+  return !(n === np || n.startsWith(np + '/'));
+}
+
+// Returns a human reason when a tool call would touch something outside the project root.
+function outsideReason(_name: string, args: Record<string, unknown>, projectPath: string | null): string | null {
+  if (!projectPath) return null;
+  const p = args.path ?? args.dir ?? args.file ?? args.directory;
+  if (typeof p === 'string' && p.trim()) {
+    const s = p.trim();
+    const abs = /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('/') || s.startsWith('\\\\');
+    if (abs && isOutsidePath(s, projectPath)) return `path: ${s}`;
+  }
+  const cmd = String(args.command ?? args.cmd ?? '');
+  if (cmd) {
+    const cands = cmd.match(/[A-Za-z]:[\\/][^\s"'|&;)]*|\/(?:home|root|usr|etc|var|opt|mnt|media|srv|tmp)\/[^\s"'|&;)]*/g) ?? [];
+    for (const c of cands) {
+      if (isOutsidePath(c, projectPath)) return `command touches: ${c.slice(0, 120)}`;
+    }
+  }
+  return null;
+}
+
+function errorHint(msg: string, local: boolean): string {
+  const m = msg.toLowerCase();
+  if (local) return 'Local model problem. Check: 1) the model is downloaded and launched (Hub → Run), 2) big models can take 1–3 min to load, 3) nothing else occupies port 8080.';
+  if (m.includes('model_not_found') || m.includes('no available channel') || m.includes('model not found')) return 'The provider has no such model behind this key. Open the API tab → Fetch → click a real Model ID from the list, then Use Model.';
+  if (m.includes('401') || m.includes('403') || m.includes('unauthorized') || m.includes('invalid api key') || m.includes('invalid_api_key')) return 'The provider rejected the API key. Paste it exactly (no spaces), and check the Base URL ends with /v1.';
+  if (m.includes('429')) return 'Rate limit or quota exceeded on the provider side — wait a bit or switch provider.';
+  if (m.includes('insufficient') || m.includes('balance') || m.includes('quota') || m.includes('payment')) return 'Insufficient balance/quota on the provider — top up the account or switch provider.';
+  return 'Check in the API tab: 1) API key & Base URL, 2) Model ID exists (use Fetch), 3) provider balance/status.';
 }

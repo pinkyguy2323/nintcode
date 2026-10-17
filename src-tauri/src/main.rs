@@ -168,17 +168,42 @@ fn detect_gpus() -> Vec<Gpu> {
             }
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    if out.is_empty() {
+        // Linux/other: lspci gives GPU names even without vendor drivers.
+        if let Ok(res) = std::process::Command::new("lspci").output() {
+            for line in String::from_utf8_lossy(&res.stdout).lines() {
+                if line.contains("VGA") || line.contains("3D controller") || line.contains("Display") {
+                    let name = line.split_once(": ").map(|(_, n)| n.to_string()).unwrap_or_else(|| line.trim().to_string());
+                    out.push(Gpu { name, vram_gb: 0, backend: "vulkan".into() });
+                }
+            }
+        }
+    }
     out
 }
 
 fn check_cuda() -> bool {
     std::process::Command::new("nvidia-smi").output().map(|o| o.status.success()).unwrap_or(false)
         || std::path::Path::new("C:\\Windows\\System32\\nvcuda.dll").exists()
+        || std::path::Path::new("/dev/nvidia0").exists()
 }
 
 fn check_vulkan() -> bool {
-    std::path::Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists()
-        || std::process::Command::new("vulkaninfo").output().map(|o| o.status.success()).unwrap_or(false)
+    if std::process::Command::new("vulkaninfo").output().map(|o| o.status.success()).unwrap_or(false) {
+        return true;
+    }
+    if cfg!(target_os = "windows") {
+        return std::path::Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists();
+    }
+    [
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "/usr/lib/libvulkan.so.1",
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so",
+        "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+    ]
+    .iter()
+    .any(|p| std::path::Path::new(p).exists())
 }
 
 // ---------- Model downloads (real, resumable) ----------
@@ -409,7 +434,13 @@ fn managed_backend(app: &AppHandle) -> Option<String> {
 }
 
 fn pick_backend() -> String {
-    if check_cuda() { "cuda".into() } else if check_vulkan() { "vulkan".into() } else { "cpu".into() }
+    if cfg!(target_os = "windows") {
+        if check_cuda() { "cuda".into() } else if check_vulkan() { "vulkan".into() } else { "cpu".into() }
+    } else {
+        // Linux: the Vulkan build runs on NVIDIA/AMD/Intel and is ~25x smaller
+        // than CUDA + cudart (~730 MB), so prefer it when Vulkan is available.
+        if check_vulkan() { "vulkan".into() } else if check_cuda() { "cuda".into() } else { "cpu".into() }
+    }
 }
 
 /// Resolve the current nightly build tag from the stable release's nightly-tag.txt asset.
@@ -436,7 +467,14 @@ async fn resolve_llama_tag(client: &reqwest::Client) -> String {
 }
 
 /// Find download URLs for the requested backend from the release assets.
+/// Windows assets are .zip, Linux assets are .tar.gz — matched per platform.
 async fn llama_download_urls(client: &reqwest::Client, tag: &str, backend: &str) -> Result<(Vec<String>, String), String> {
+    let win = cfg!(target_os = "windows");
+    let (cpu_sfx, vulkan_sfx, cuda_sfx) = if win {
+        ("bin-win-cpu-x64.zip", "bin-win-vulkan-x64.zip", "cuda-12.4-x64.zip")
+    } else {
+        ("bin-ubuntu-x64.tar.gz", "bin-ubuntu-vulkan-x64.tar.gz", "cuda-12.8-x64.tar.gz")
+    };
     // Try the API first (exact asset URLs).
     if let Ok(r) = client.get(format!("{GH_API}/tags/{tag}")).send().await {
         if r.status().is_success() {
@@ -450,11 +488,14 @@ async fn llama_download_urls(client: &reqwest::Client, tag: &str, backend: &str)
                         let lname = name.to_lowercase();
                         match backend {
                             "cuda" => {
-                                if lname.contains("bin-win-cuda-12.4-x64.zip") { main = url; }
-                                else if lname.starts_with("cudart-llama-bin-win-cuda-12.4-x64") { cudart = url; }
+                                if lname.starts_with("cudart") {
+                                    if lname.contains(cuda_sfx) { cudart = url; }
+                                } else if lname.contains(cuda_sfx) {
+                                    main = url;
+                                }
                             }
-                            "vulkan" => { if lname.contains("bin-win-vulkan-x64.zip") { main = url; } }
-                            _ => { if lname.contains("bin-win-cpu-x64.zip") { main = url; } }
+                            "vulkan" => { if lname.contains(vulkan_sfx) { main = url; } }
+                            _ => { if lname.contains(cpu_sfx) { main = url; } }
                         }
                     }
                 }
@@ -468,10 +509,18 @@ async fn llama_download_urls(client: &reqwest::Client, tag: &str, backend: &str)
     }
     // Fallback: construct the direct release download URLs from the tag.
     let base = format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}");
-    let (file, cudart_file) = match backend {
-        "cuda" => (format!("llama-{tag}-bin-win-cuda-12.4-x64.zip"), Some("cudart-llama-bin-win-cuda-12.4-x64.zip".to_string())),
-        "vulkan" => (format!("llama-{tag}-bin-win-vulkan-x64.zip"), None),
-        _ => (format!("llama-{tag}-bin-win-cpu-x64.zip"), None),
+    let (file, cudart_file) = if win {
+        match backend {
+            "cuda" => (format!("llama-{tag}-bin-win-cuda-12.4-x64.zip"), Some("cudart-llama-bin-win-cuda-12.4-x64.zip".to_string())),
+            "vulkan" => (format!("llama-{tag}-bin-win-vulkan-x64.zip"), None),
+            _ => (format!("llama-{tag}-bin-win-cpu-x64.zip"), None),
+        }
+    } else {
+        match backend {
+            "cuda" => (format!("llama-{tag}-bin-ubuntu-cuda-12.8-x64.tar.gz"), Some(format!("cudart-llama-{tag}-bin-ubuntu-cuda-12.8-x64.tar.gz"))),
+            "vulkan" => (format!("llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz"), None),
+            _ => (format!("llama-{tag}-bin-ubuntu-x64.tar.gz"), None),
+        }
     };
     let mut urls = vec![format!("{base}/{file}")];
     if let Some(c) = cudart_file { urls.push(format!("{base}/{c}")); }
@@ -526,58 +575,108 @@ fn extract_zip(zip_path: &std::path::Path, dest: &std::path::Path) -> Result<(),
     Ok(())
 }
 
+fn extract_tar_gz(archive_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let f = std::fs::File::open(archive_path).map_err(|e| e.to_string())?;
+    let gz = flate2::read::GzDecoder::new(f);
+    let mut ar = tar::Archive::new(gz);
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    ar.unpack(dest).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn extract_archive(archive_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        extract_zip(archive_path, dest)
+    } else {
+        extract_tar_gz(archive_path, dest)
+    }
+}
+
+/// On Unix the extracted llama-server and shared libs must be executable.
+#[cfg(unix)]
+fn chmod_executables(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(d: &std::path::Path) {
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p);
+                continue;
+            }
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let lname = name.to_lowercase();
+            if is_server_name(&name) || lname.ends_with(".so") || lname.contains(".so.") {
+                if let Ok(md) = std::fs::metadata(&p) {
+                    let mut perm = md.permissions();
+                    perm.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&p, perm);
+                }
+            }
+        }
+    }
+    walk(dir);
+}
+
+#[cfg(not(unix))]
+fn chmod_executables(_dir: &std::path::Path) {}
+
 /// One-click install of llama.cpp runtime. backend: "auto" | "cuda" | "vulkan" | "cpu".
-/// Returns the path to llama-server.
+/// Returns the path to llama-server. Works on Windows (.zip) and Linux (.tar.gz).
 #[tauri::command]
 async fn install_llama_runtime(app: AppHandle, backend: Option<String>) -> Result<String, String> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (&app, &backend);
-        return Err("Automatic runtime install is currently Windows-only. Install llama.cpp via your package manager or build from source.".into());
+    let backend = match backend.as_deref() {
+        Some("cuda") | Some("vulkan") | Some("cpu") => backend.unwrap().to_lowercase(),
+        _ => pick_backend(),
+    };
+    let win = cfg!(target_os = "windows");
+    let client = gh_client()?;
+    let _ = app.emit("runtime-progress", RuntimeProgress { stage: "resolve".into(), pct: 0, label: "Checking latest llama.cpp build…".into() });
+    let tag = resolve_llama_tag(&client).await;
+    let (urls, tag) = llama_download_urls(&client, &tag, &backend).await?;
+
+    let root = runtime_root(&app)?;
+    let dir = root.join(&backend);
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    #[cfg(target_os = "windows")]
-    {
-        let backend = match backend.as_deref() {
-            Some("cuda") | Some("vulkan") | Some("cpu") => backend.unwrap().to_lowercase(),
-            _ => pick_backend(),
-        };
-        let client = gh_client()?;
-        let _ = app.emit("runtime-progress", RuntimeProgress { stage: "resolve".into(), pct: 0, label: "Checking latest llama.cpp build…".into() });
-        let tag = resolve_llama_tag(&client).await;
-        let (urls, tag) = llama_download_urls(&client, &tag, &backend).await?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-        let root = runtime_root(&app)?;
-        let dir = root.join(&backend);
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Download main build (+ cudart for CUDA).
+    let archive_name = if win { "llama-runtime.zip" } else { "llama-runtime.tar.gz" };
+    let main_archive = dir.join(archive_name);
+    let size_hint = if backend == "cuda" {
+        if win { "~630 MB" } else { "~730 MB" }
+    } else if backend == "vulkan" {
+        if win { "~35 MB" } else { "~29 MB" }
+    } else if win {
+        "~20 MB"
+    } else {
+        "~17 MB"
+    };
+    download_file(&client, &app, &urls[0], &main_archive, &format!("Downloading llama.cpp ({backend}, {size_hint})")).await?;
 
-        // Download main build (+ cudart for CUDA).
-        let main_zip = dir.join("llama-runtime.zip");
-        let size_hint = if backend == "cuda" { "~600 MB" } else if backend == "vulkan" { "~35 MB" } else { "~20 MB" };
-        download_file(&client, &app, &urls[0], &main_zip, &format!("Downloading llama.cpp ({backend}, {size_hint})")).await?;
+    let _ = app.emit("runtime-progress", RuntimeProgress { stage: "extract".into(), pct: 50, label: "Unpacking llama.cpp…".into() });
+    extract_archive(&main_archive, &dir)?;
+    let _ = std::fs::remove_file(&main_archive);
 
-        let _ = app.emit("runtime-progress", RuntimeProgress { stage: "extract".into(), pct: 50, label: "Unpacking llama.cpp…".into() });
-        extract_zip(&main_zip, &dir)?;
-        let _ = std::fs::remove_file(&main_zip);
-
-        if backend == "cuda" && urls.len() > 1 {
-            let cudart_zip = dir.join("cudart.zip");
-            download_file(&client, &app, &urls[1], &cudart_zip, "Downloading CUDA libraries (~380 MB)").await?;
-            let server = find_server_in(&dir, 3).ok_or_else(|| "llama-server.exe missing after extraction".to_string())?;
-            let target = server.parent().unwrap_or(&dir).to_path_buf();
-            extract_zip(&cudart_zip, &target)?;
-            let _ = std::fs::remove_file(&cudart_zip);
-        }
-
-        // Marker with the build tag.
-        let _ = std::fs::write(dir.join("nintcode-build.txt"), &tag);
-
-        let server = find_server_in(&dir, 3).ok_or_else(|| "llama-server.exe not found in the downloaded archive".to_string())?;
-        let _ = app.emit("runtime-progress", RuntimeProgress { stage: "done".into(), pct: 100, label: format!("llama.cpp {tag} ({backend}) ready") });
-        Ok(server.to_string_lossy().to_string())
+    if backend == "cuda" && urls.len() > 1 {
+        let cudart_archive = dir.join(archive_name);
+        let cuda_libs_size = if win { "~380 MB" } else { "~570 MB" };
+        download_file(&client, &app, &urls[1], &cudart_archive, &format!("Downloading CUDA libraries ({cuda_libs_size})")).await?;
+        let server = find_server_in(&dir, 3).ok_or_else(|| "llama-server missing after extraction".to_string())?;
+        let target = server.parent().unwrap_or(&dir).to_path_buf();
+        extract_archive(&cudart_archive, &target)?;
+        let _ = std::fs::remove_file(&cudart_archive);
     }
+
+    // Marker with the build tag.
+    let _ = std::fs::write(dir.join("nintcode-build.txt"), &tag);
+
+    let server = find_server_in(&dir, 3).ok_or_else(|| "llama-server not found in the downloaded archive".to_string())?;
+    chmod_executables(&dir);
+    let _ = app.emit("runtime-progress", RuntimeProgress { stage: "done".into(), pct: 100, label: format!("llama.cpp {tag} ({backend}) ready") });
+    Ok(server.to_string_lossy().to_string())
 }
 
 #[tauri::command]

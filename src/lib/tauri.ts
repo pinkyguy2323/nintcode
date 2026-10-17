@@ -4,6 +4,11 @@ export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+export function isWin(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  return /Windows/i.test(navigator.userAgent);
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error('not-tauri');
   const mod = await import('@tauri-apps/api/core');
@@ -20,11 +25,8 @@ export async function listDir(path: string) {
 }
 
 export async function readTextFile(path: string): Promise<string> {
-  try {
-    return await invoke<string>('read_file', { path });
-  } catch {
-    return localStorage.getItem('nintcode:file:' + path) ?? '';
-  }
+  if (isTauri()) return invoke<string>('read_file', { path });
+  return localStorage.getItem('nintcode:file:' + path) ?? '';
 }
 
 export async function writeTextFile(path: string, content: string): Promise<void> {
@@ -97,6 +99,20 @@ export interface ChatCompletionOpts {
   throttleMs?: number;
 }
 
+// Turn an HTTP error response into a clear Error: parses provider JSON bodies
+// ({"error":{"code","message"}}) so the chat/API tab can show the real cause.
+async function httpError(res: Response): Promise<Error> {
+  const txt = await res.text().catch(() => '');
+  let detail = txt.replace(/\s+/g, ' ').trim().slice(0, 400);
+  try {
+    const j = JSON.parse(txt) as { error?: { code?: string; message?: string; type?: string }; message?: string };
+    const e = (j.error ?? j) as { code?: string; message?: string };
+    const code = e.code ? `[${e.code}] ` : '';
+    if (e.message) detail = code + String(e.message);
+  } catch { /* keep raw text */ }
+  return new Error(`HTTP ${res.status}${detail ? ' — ' + detail : ''}`);
+}
+
 export async function streamChatCompletion(opts: ChatCompletionOpts): Promise<string> {
   const url = opts.baseUrl.replace(/\/$/, '') + '/chat/completions';
   const res = await fetch(url, {
@@ -109,8 +125,7 @@ export async function streamChatCompletion(opts: ChatCompletionOpts): Promise<st
     signal: opts.signal,
   });
   if (!res.ok || !res.body) {
-    const txt = await res.text().catch(() => '');
-    throw new Error('HTTP ' + res.status + ' ' + txt.slice(0, 300));
+    throw await httpError(res);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -144,7 +159,7 @@ export async function streamChatCompletion(opts: ChatCompletionOpts): Promise<st
 export async function testProvider(p: Provider): Promise<string> {
   const url = p.baseUrl.replace(/\/$/, '') + '/models';
   const res = await fetch(url, { headers: p.apiKey ? { Authorization: 'Bearer ' + p.apiKey } : {} });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
+  if (!res.ok) throw await httpError(res);
   const j = await res.json().catch(() => ({}));
   const n = Array.isArray((j as { data?: unknown[] }).data) ? (j as { data: unknown[] }).data.length : 0;
   return 'OK — models: ' + n;
@@ -153,7 +168,7 @@ export async function testProvider(p: Provider): Promise<string> {
 export async function fetchProviderModels(p: Provider): Promise<string[]> {
   const url = p.baseUrl.replace(/\/$/, '') + '/models';
   const res = await fetch(url, { headers: p.apiKey ? { Authorization: 'Bearer ' + p.apiKey } : {} });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
+  if (!res.ok) throw await httpError(res);
   const j = await res.json() as { data?: { id: string }[] };
   return (j.data ?? []).map((m) => m.id);
 }

@@ -1,6 +1,6 @@
 [package]
 name = "nintcode"
-version = "0.6.0"
+version = "0.7.0"
 description = "NintCode — The Free Local AI Coding Workspace"
 edition = "2021"
 
@@ -23,6 +23,8 @@ futures-util = "0.3"
 sysinfo = "0.30"
 rusqlite = { version = "0.31", features = ["bundled"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
 
 [features]
 default = ["custom-protocol"]

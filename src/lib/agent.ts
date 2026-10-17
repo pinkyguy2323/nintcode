@@ -24,10 +24,13 @@ Tools:
 
 Rules:
 - JSON must be VALID: inside "content" escape newlines as \\n and double quotes as \\". Never put raw line breaks inside JSON strings.
+- Create files YOURSELF: write_file creates missing parent folders automatically. On "FILE NOT FOUND" never stop — just write_file the new file (full content) and continue the task.
 - One tool call per file. NEVER emit the same call twice.
 - At most 3 tool calls per turn. After tool results come back: continue with the next needed call, or finish with ONE short sentence (max 2 lines). No code dumps, no plans repeated in chat.
+- Work inside the project root. If a task truly needs a path outside it, just call the tool — the app will ask the user to confirm before it runs.
 - Ask for confirmation before delete_file / install / rm -rf.
 - Paths are relative to the project root.
+- On Linux and Windows shells differ: prefer plain commands that exist on both (mkdir, git, node, npm, python), avoid cmd-only or bash-only flags.
 - In Ask mode: explanation only, no tool calls. In Plan mode: a short numbered plan only.
 - Follow NINTCODE.md if it is injected as context.`;
 

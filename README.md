@@ -2,6 +2,7 @@
 
 Бесплатная локальная AI IDE: **Tauri 2 + React + TypeScript + Monaco + xterm.js + Rust + llama.cpp**.
 Без подписок, без обязательных API-ключей. Локальные модели работают на GPU пользователя.
+**Полная поддержка Windows 10/11 x64 и Linux x64** (включая авто-установку llama.cpp под Linux и команды через `sh`).
 
 ## Готовые сборки
 
@@ -9,23 +10,25 @@
 
 | Файл | Тип |
 |---|---|
-| `NintCode_0.6.0_x64-setup.exe` | NSIS установщик (Windows 10/11 x64) |
-| `NintCode_0.6.0_x64_en-US.msi` | MSI |
+| `NintCode_0.7.0_x64-setup.exe` | NSIS установщик (Windows 10/11 x64) |
+| `NintCode_0.7.0_x64_en-US.msi` | MSI (Windows x64) |
 
 Портативный exe собирается в `F:\nintcode\src-tauri\target\release\nintcode.exe`.
+На Linux собирается `.deb`/`.AppImage` из исходников (`npx tauri build` на Linux — конфиг уже готов).
 
 ## Что уже реально работает
 
 - **Окно приложения**: свой titlebar с надёжным перетаскиванием (mousedown + `startDragging`), ресайз за края окна, двойной клик — maximize, тёмная графитовая тема + светлая, масштаб UI, 3 панели с ресайзом (файлы / редактор+терминал / AI-чат) — размеры панелей запоминаются.
 - **Рабочие директории**: открытие папки через нативный диалог, дерево файлов, недавние проекты, поиск, git-статус (`git status --short --branch`).
 - **Редактор**: Monaco (вкладки, миникарта, подсветка, Ctrl+S, автосейв, Markdown-preview).
-- **Терминал**: xterm.js + реальное выполнение команд через Rust (`run_command`, cmd.exe), вывод stdout/stderr, реальный код возврата.
+- **Терминал**: xterm.js + реальное выполнение команд через Rust (`run_command`: `cmd.exe` на Windows, `sh -lc` на Linux), вывод stdout/stderr, реальный код возврата.
 - **AI-чат**: Ask / Plan / Agent, потоковая генерация (SSE), стоп, @-упоминания файлов, `NINTCODE.md`, история между перезапусками.
-- **Агент**: реальные инструменты `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `search_code`, `create_directory`, `run_terminal_command`, `run_tests`, `inspect_git_diff`; подтверждение опасных действий (удаление, install, rm -rf), запрет доступа вне проекта.
+- **Агент, который сам создаёт файлы**: `write_file` сам создаёт все вложенные папки; если файла нет — агент обязан создать его, а не останавливаться («FILE NOT FOUND» → сразу `write_file`). После записи файл **автоматически открывается в редакторе** (и перечитывается с диска, даже если вкладка уже была открыта), в чате видно `✅ Created src/App.tsx (1.2 KB, 42 lines)`. Рабочие инструменты: `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `search_code`, `create_directory`, `run_terminal_command`, `run_tests`, `inspect_git_diff`; подтверждение опасных действий (удаление, install, rm -rf). **Выход за пределы папки проекта — только с подтверждением пользователя** (кнопка allow/deny прямо в чате, с указанием причины).
+- **Понятные ошибки API**: JSON-ошибки провайдеров расшифровываются (`[model_not_found] …`), а под сообщением появляется конкретная подсказка: для облака — «вкладка API → Fetch → выбери реальный Model ID», для локали — проверка запуска llama-server. В API-вкладке Fetch Models показывает список моделей провайдера — клик по чипу сразу назначает Model ID.
 - **Model Hub**: 41 модель с проверенными ссылками — вся практичная семья **Mistral** (Mistral 7B v0.3, Ministral 8B, Mistral Nemo 12B, Mistral Small 3.1 24B, Codestral 22B, Devstral 24B, Mixtral 8x7B), большие (Qwen2.5-Coder 14B/32B, Qwen3 14B/30B-A3B, Gemma 3 12B, Phi-4, StarCoder2 15B, DeepSeek-Coder-V2 Lite, Codestral, Devstral), средние (Gemma 2 9B, GLM-4 9B, DeepSeek-R1-Distill 8B, Qwen3 8B, Granite 3.1, Nemotron Mini 4B), лёгкие и крошечные (Qwen2.5-Coder 0.5B–7B, Qwen3 4B, Llama 3.2 1B/3B, Llama 3.1 8B, Phi-4-mini, Gemma 3 1B/4B, Gemma 2 2B, SmolLM2 360M/1.7B, Yi-Coder). Каждый URL проверен на существование; закрытые/удалённые репозитории не включены. Реальная загрузка GGUF с прогрессом и **докачкой (HTTP Range)**, проверка целостности (магия `GGUF`), импорт локальных GGUF.
 - **Hardware**: реальное определение CPU/RAM (sysinfo), GPU (`nvidia-smi`, `wmic`), CUDA (`nvcuda.dll`), Vulkan (`vulkan-1.dll`); режим GPU Only.
 - **Режимы мощности**: Performance / Balanced / **Eco (экономия)** — Eco при запуске llama-server даёт мало потоков CPU, idle-приоритет процесса (Windows `IDLE_PRIORITY_CLASS`), контекст 4k и мягкий троттлинг стрима (HTTP back-pressure) — генерация идёт медленнее, но GPU/CPU реально разгружаются. Текущий профиль виден в статус-баре. Плюс **Advanced load control**: слайдер GPU-слоёв (`-ngl`, меньше слоёв = меньше VRAM/RAM) и выбор размера контекста (KV-кэш, 2К–32К).
-- **Локальный запуск моделей**: кнопка Run сама ставит и запускает llama.cpp (авто-выбор CUDA/Vulkan/CPU по железу, скачивание официальной nightly-сборки с GitHub, распаковка, health-чек, повторные запуски без задержек).
+- **Локальный запуск моделей**: кнопка Run сама ставит и запускает llama.cpp (авто-выбор CUDA/Vulkan/CPU по железу, скачивание официальной nightly-сборки с GitHub, распаковка, health-чек, повторные запуски без задержек). **Windows**: `.zip`-сборки; **Linux**: `.tar.gz` ubuntu-сборки (авто — Vulkan, если доступен, иначе CPU; CUDA доступна вручную), права на исполнение выставляются автоматически.
 - **AI Providers**: Base URL + API Key + Model ID для любого OpenAI-совместимого сервера (llama.cpp server, Ollama `:11434/v1`, LM Studio `:1234/v1`), кнопки Test Connection / Fetch Models / Save / Use Model.
 - **Настройки**: язык RU/EN, тема, масштаб, папка моделей, права агента, приватность; персист через localStorage (на десктопе доступен Tauri Store) + SQLite-схема в Rust.
 
